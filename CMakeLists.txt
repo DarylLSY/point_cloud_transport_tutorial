@@ -15,9 +15,12 @@ endif()
 find_package(ament_cmake_ros REQUIRED)
 
 find_package(point_cloud_transport REQUIRED)
+find_package(message_filters REQUIRED)
+find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rclcpp_components REQUIRED)
 find_package(rcpputils REQUIRED)
-find_package(rosbag2_cpp REQUIRED)
+find_package(rmw REQUIRED)
 find_package(sensor_msgs REQUIRED)
 
 include_directories(
@@ -25,21 +28,20 @@ include_directories(
 )
 
 # encoder
-add_executable(encoder_test src/my_encoder.cpp)
-ament_target_dependencies(encoder_test point_cloud_transport rosbag2_cpp sensor_msgs)
+# add_executable(encoder_test src/my_encoder.cpp)
+# ament_target_dependencies(encoder_test point_cloud_transport rosbag2_cpp sensor_msgs)
 
 # publisher
 add_executable(publisher_test src/my_publisher.cpp)
-ament_target_dependencies(publisher_test point_cloud_transport rclcpp rcpputils rosbag2_cpp sensor_msgs)
+ament_target_dependencies(publisher_test point_cloud_transport rclcpp rcpputils sensor_msgs pluginlib rclcpp_components)
 
 # subscriber
 add_executable(subscriber_test src/my_subscriber.cpp)
-ament_target_dependencies(subscriber_test point_cloud_transport rclcpp sensor_msgs)
+ament_target_dependencies(subscriber_test point_cloud_transport rclcpp sensor_msgs pluginlib message_filters rclcpp_components)
 
 # Install executables
 install(
   TARGETS
-    encoder_test
     publisher_test
     subscriber_test
   RUNTIME DESTINATION lib/${PROJECT_NAME}

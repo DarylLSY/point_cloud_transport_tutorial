@@ -1,5 +1,6 @@
 // Copyright (c) 2023, Czech Technical University in Prague
-// Copyright (c) 2023, Open Source Robotics Foundation, Inc. All rights reserved.
+// Copyright (c) 2019, paplhjak
+// Copyright (c) 2009, Willow Garage, Inc.
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are met:
@@ -11,7 +12,7 @@
 //      notice, this list of conditions and the following disclaimer in the
 //      documentation and/or other materials provided with the distribution.
 //
-//    * Neither the name of the Willow Garage nor the names of its
+//    * Neither the name of the copyright holder nor the names of its
 //      contributors may be used to endorse or promote products derived from
 //      this software without specific prior written permission.
 //
@@ -26,76 +27,143 @@
 // CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
+//
 
+#include <memory>
+#include <string>
+#include <utility>
 
-#include <iostream>
-
-// for reading rosbag
-#include <ament_index_cpp/get_package_share_directory.hpp>
-
-#include <point_cloud_transport/point_cloud_transport.hpp>
-#include <rclcpp/serialization.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <rcpputils/filesystem_helper.hpp>
-#include <rosbag2_cpp/reader.hpp>
-#include <rosbag2_storage/storage_options.hpp>
-#include <rosbag2_cpp/converter_interfaces/serialization_format_converter.hpp>
+
+#include <pluginlib/class_loader.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+
+#include <point_cloud_transport/exception.hpp>
+#include <point_cloud_transport/point_cloud_transport.hpp>
+#include <point_cloud_transport/publisher.hpp>
+#include <point_cloud_transport/publisher_plugin.hpp>
+#include <point_cloud_transport/subscriber.hpp>
+
+using namespace std::chrono_literals;
+
+namespace point_cloud_transport
+{
+class Republisher : public rclcpp::Node
+{
+public:
+  //! Constructor
+  explicit Republisher(const rclcpp::NodeOptions & options);
+
+private:
+  void initialize();
+
+  std::shared_ptr<point_cloud_transport::PointCloudTransport> pct;
+  rclcpp::TimerBase::SharedPtr timer_;
+  bool initialized_{false};
+  point_cloud_transport::Subscriber sub;
+  std::shared_ptr<point_cloud_transport::PublisherPlugin> pub;
+  std::shared_ptr<point_cloud_transport::Publisher> simple_pub;
+};
+
+Republisher::Republisher(const rclcpp::NodeOptions & options)
+: Node("raw_to_draco", options)
+{
+  // Initialize Republishercomponent after construction
+  // shared_from_this can't be used in the constructor
+  this->timer_ = create_wall_timer(
+    1ms, [this]() {
+      if (initialized_) {
+        timer_->cancel();
+      } else {
+        this->initialize();
+        initialized_ = true;
+      }
+    });
+}
+
+void Republisher::initialize()
+{
+  std::string in_topic = "/livox/lidar";
+  std::string out_topic = "/livox/lidar";
+  std::string in_transport = "raw";
+  std::string out_transport = "draco";
+
+  pct = std::make_shared<point_cloud_transport::PointCloudTransport>(this->shared_from_this());
+
+  auto qos_override_options = rclcpp::QosOverridingOptions(
+  {
+    rclcpp::QosPolicyKind::Depth,
+    rclcpp::QosPolicyKind::Durability,
+    rclcpp::QosPolicyKind::History,
+    rclcpp::QosPolicyKind::Reliability,
+  });
+  rclcpp::SubscriptionOptions sub_options;
+  rclcpp::PublisherOptions pub_options;
+  pub_options.qos_overriding_options = qos_override_options;
+  sub_options.qos_overriding_options = qos_override_options;
+
+  if (out_transport.empty()) {
+    // Use all available transports for output
+    this->simple_pub =
+      std::make_shared<point_cloud_transport::Publisher>(
+      pct->advertise(
+        out_topic,
+        rmw_qos_profile_default));
+
+    RCLCPP_INFO_STREAM(
+      this->get_logger(),
+      "out topic1: " << this->simple_pub->getTopic());
+
+    // Use Publisher::publish as the subscriber callback
+    typedef void (point_cloud_transport::Publisher::* PublishMemFn)(
+      const sensor_msgs::msg::
+      PointCloud2::ConstSharedPtr &) const;
+    PublishMemFn pub_mem_fn = &point_cloud_transport::Publisher::publish;
+
+    const point_cloud_transport::TransportHints hint(in_transport);
+    this->sub = pct->subscribe(
+      in_topic, static_cast<uint32_t>(1),
+      pub_mem_fn, this->simple_pub, &hint);
+  } else {
+    // Load transport plugin
+    typedef point_cloud_transport::PublisherPlugin Plugin;
+    auto loader = pct->getPublisherLoader();
+    std::string lookup_name = Plugin::getLookupName(out_transport);
+    RCLCPP_INFO(this->get_logger(), "Loading %s publisher", lookup_name.c_str());
+
+    auto instance = loader->createUniqueInstance(lookup_name);
+    // DO NOT use instance after this line
+    this->pub = std::move(instance);
+    pub->advertise(this->shared_from_this(), out_topic);
+
+    RCLCPP_INFO_STREAM(
+      this->get_logger(),
+      "out topic2: " << this->pub->getTopic());
+
+    // Use PublisherPlugin::publish as the subscriber callback
+    typedef void (point_cloud_transport::PublisherPlugin::* PublishMemFn)(
+      const sensor_msgs::msg::
+      PointCloud2::ConstSharedPtr &) const;
+    PublishMemFn pub_mem_fn = &point_cloud_transport::PublisherPlugin::publish;
+
+    RCLCPP_INFO(this->get_logger(), "Loading %s subscriber", in_topic.c_str());
+
+    const point_cloud_transport::TransportHints hint(in_transport);
+    this->sub = pct->subscribe(
+      in_topic, static_cast<uint32_t>(1),
+      pub_mem_fn, pub, &hint);
+  }
+  RCLCPP_INFO_STREAM(
+    this->get_logger(),
+    "in topic: " << this->sub.getTopic());
+}  // namespace point_cloud_transport
+}
+#include "rclcpp_components/register_node_macro.hpp"
 
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-
-  auto node = std::make_shared<rclcpp::Node>("point_cloud_publisher");
-
-  point_cloud_transport::PointCloudTransport pct(node);
-  point_cloud_transport::Publisher pub = pct.advertise("pct/point_cloud", 100);
-
-  const std::string bagged_cloud_topic = "/point_cloud";
-  const std::string shared_directory = ament_index_cpp::get_package_share_directory(
-    "point_cloud_transport_tutorial");
-  std::string bag_file = shared_directory + "/resources/rosbag2_2023_08_05-16_08_51";
-
-  if (argc > 1) {
-    bag_file = argv[1];
-  }
-
-  if (!rcpputils::fs::exists(bag_file)) {
-    std::cout << "Not able to open file [" << bag_file << "]" << '\n';
-    return -1;
-  }
-
-  std::cout << "Reading [" << bag_file << "] bagfile" << '\n';
-
-  // boiler-plate to tell rosbag2 how to read our bag
-  rosbag2_storage::StorageOptions storage_options;
-  storage_options.uri = bag_file;
-  storage_options.storage_id = "mcap";
-  rosbag2_cpp::ConverterOptions converter_options;
-  converter_options.input_serialization_format = "cdr";
-  converter_options.output_serialization_format = "cdr";
-
-  // open the rosbag
-  rosbag2_cpp::readers::SequentialReader reader;
-  reader.open(storage_options, converter_options);
-
-  sensor_msgs::msg::PointCloud2 cloud_msg;
-  rclcpp::Serialization<sensor_msgs::msg::PointCloud2> cloud_serialization;
-  while (reader.has_next() && rclcpp::ok()) {
-    // get serialized data
-    auto serialized_message = reader.read_next();
-    rclcpp::SerializedMessage extracted_serialized_msg(*serialized_message->serialized_data);
-    if (serialized_message->topic_name == bagged_cloud_topic) {
-      // deserialize and convert to ros2 message
-      cloud_serialization.deserialize_message(&extracted_serialized_msg, &cloud_msg);
-      // publish the message
-      pub.publish(cloud_msg);
-      rclcpp::spin_some(node);
-      rclcpp::sleep_for(std::chrono::milliseconds(100));
-    }
-  }
-  reader.close();
-
-  node.reset();
+  rclcpp::spin(std::make_shared<point_cloud_transport::Republisher>(rclcpp::NodeOptions()));
   rclcpp::shutdown();
+  return 0;
 }
