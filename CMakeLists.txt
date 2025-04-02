@@ -47,12 +47,6 @@ install(
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
-install(
-  DIRECTORY
-    resources
-  DESTINATION share/${PROJECT_NAME}
-)
-
 install(PROGRAMS
   scripts/publisher.py
   scripts/subscriber_old_school.py
